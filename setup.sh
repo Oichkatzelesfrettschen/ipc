@@ -47,7 +47,8 @@ done
 
 pip3 install --no-cache-dir \
   tensorflow-cpu jax jaxlib \
-  tensorflow-model-optimization mlflow onnxruntime-tools
+  tensorflow-model-optimization mlflow onnxruntime-tools \
+  cffi
 
 #— QEMU emulation for foreign binaries
 for pkg in \
@@ -95,6 +96,27 @@ for pkg in \
   fpc lazarus zig nim nimble crystal shards gforth; do
   apt_pin_install "$pkg"
 done
+
+#— Install the latest Go (>=1.23)
+GO_STABLE=$(curl -fsSL https://go.dev/VERSION?m=stable | tr -d '\n' | sed 's/^go//')
+if dpkg --compare-versions "$GO_STABLE" ge "1.23"; then
+  GO_VERSION="go${GO_STABLE}"
+else
+  GO_VERSION="go1.23.0"
+fi
+curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+rm /tmp/go.tgz
+echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
+export PATH=/usr/local/go/bin:$PATH
+export GOBIN=/usr/local/bin
+
+#— Go development tools
+go install golang.org/x/tools/cmd/goimports@latest
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+go install github.com/go-delve/delve/cmd/dlv@latest
+go install github.com/google/gofuzz@latest
+go install honnef.co/go/tools/cmd/staticcheck@latest
 
 #— GUI & desktop-dev frameworks
 for pkg in \
