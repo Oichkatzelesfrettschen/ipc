@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LOG_FILE=/var/log/setup_failures.log
+touch "$LOG_FILE"
 export DEBIAN_FRONTEND=noninteractive
 
 #— helper to pin to the repo’s exact version if it exists
@@ -8,9 +10,25 @@ apt_pin_install(){
   ver=$(apt-cache show "$pkg" 2>/dev/null \
         | awk '/^Version:/{print $2; exit}')
   if [ -n "$ver" ]; then
+    set +e
     apt-get install -y "${pkg}=${ver}"
+    status=$?
+    set -e
   else
+    set +e
     apt-get install -y "$pkg"
+    status=$?
+    set -e
+  fi
+  if [ $status -ne 0 ]; then
+    echo "apt install failed: $pkg" | tee -a "$LOG_FILE"
+    if [[ "$pkg" == python3-* ]]; then
+      pip_pkg="${pkg#python3-}"
+      echo "attempting pip install: $pip_pkg" | tee -a "$LOG_FILE"
+      if ! pip3 install --no-cache-dir "$pip_pkg" >>"$LOG_FILE" 2>&1; then
+        echo "pip install failed: $pip_pkg" | tee -a "$LOG_FILE"
+      fi
+    fi
   fi
 }
 
@@ -19,7 +37,13 @@ for arch in i386 armel armhf arm64 riscv64 powerpc ppc64el ia64; do
   dpkg --add-architecture "$arch"
 done
 
+set +e
 apt-get update -y
+status=$?
+set -e
+if [ $status -ne 0 ]; then
+  echo "apt-get update failed" | tee -a "$LOG_FILE"
+fi
 
 #— core build tools, formatters, analysis, science libs
 for pkg in \
@@ -45,10 +69,16 @@ for pkg in \
   apt_pin_install "$pkg"
 done
 
+set +e
 pip3 install --no-cache-dir \
   tensorflow-cpu jax jaxlib \
   tensorflow-model-optimization mlflow onnxruntime-tools \
   cffi
+status=$?
+set -e
+if [ $status -ne 0 ]; then
+  echo "pip install failed" | tee -a "$LOG_FILE"
+fi
 
 #— QEMU emulation for foreign binaries
 for pkg in \
@@ -98,25 +128,46 @@ for pkg in \
 done
 
 #— Install the latest Go (>=1.23)
+set +e
 GO_STABLE=$(curl -fsSL https://go.dev/VERSION?m=stable | tr -d '\n' | sed 's/^go//')
-if dpkg --compare-versions "$GO_STABLE" ge "1.23"; then
-  GO_VERSION="go${GO_STABLE}"
-else
+status=$?
+if [ $status -ne 0 ]; then
   GO_VERSION="go1.23.0"
+else
+  if dpkg --compare-versions "$GO_STABLE" ge "1.23"; then
+    GO_VERSION="go${GO_STABLE}"
+  else
+    GO_VERSION="go1.23.0"
+  fi
 fi
 curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
-rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
-rm /tmp/go.tgz
-echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
-export PATH=/usr/local/go/bin:$PATH
+status=$?
+if [ $status -eq 0 ]; then
+  rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+  rm /tmp/go.tgz
+  echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
+  export PATH=/usr/local/go/bin:$PATH
+else
+  echo "Go download failed" | tee -a "$LOG_FILE"
+fi
+set -e
 export GOBIN=/usr/local/bin
 
 #— Go development tools
-go install golang.org/x/tools/cmd/goimports@latest
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-go install github.com/go-delve/delve/cmd/dlv@latest
-go install github.com/google/gofuzz@latest
-go install honnef.co/go/tools/cmd/staticcheck@latest
+for tool in \
+  golang.org/x/tools/cmd/goimports@latest \
+  github.com/golangci/golangci-lint/cmd/golangci-lint@latest \
+  github.com/go-delve/delve/cmd/dlv@latest \
+  github.com/google/gofuzz@latest \
+  honnef.co/go/tools/cmd/staticcheck@latest; do
+  set +e
+  go install "$tool"
+  status=$?
+  set -e
+  if [ $status -ne 0 ]; then
+    echo "go install failed: $tool" | tee -a "$LOG_FILE"
+  fi
+done
 
 #— GUI & desktop-dev frameworks
 for pkg in \
@@ -141,19 +192,33 @@ for pkg in \
 done
 
 #— IA-16 (8086/286) cross-compiler
+set +e
 IA16_VER=$(curl -fsSL https://api.github.com/repos/tkchia/gcc-ia16/releases/latest \
            | awk -F"\"" '/tag_name/{print $4; exit}')
 curl -fsSL "https://github.com/tkchia/gcc-ia16/releases/download/${IA16_VER}/ia16-elf-gcc-linux64.tar.xz" \
   | tar -Jx -C /opt
-echo 'export PATH=/opt/ia16-elf-gcc/bin:$PATH' > /etc/profile.d/ia16.sh
-export PATH=/opt/ia16-elf-gcc/bin:$PATH
+status=$?
+set -e
+if [ $status -ne 0 ]; then
+  echo "IA-16 cross-compiler install failed" | tee -a "$LOG_FILE"
+else
+  echo 'export PATH=/opt/ia16-elf-gcc/bin:$PATH' > /etc/profile.d/ia16.sh
+  export PATH=/opt/ia16-elf-gcc/bin:$PATH
+fi
 
 #— protoc installer (pinned)
 PROTO_VERSION=25.1
+set +e
 curl -fsSL "https://raw.githubusercontent.com/protocolbuffers/protobuf/v${PROTO_VERSION}/protoc-${PROTO_VERSION}-linux-x86_64.zip" \
   -o /tmp/protoc.zip
-unzip -d /usr/local /tmp/protoc.zip
-rm /tmp/protoc.zip
+status=$?
+if [ $status -eq 0 ]; then
+  unzip -d /usr/local /tmp/protoc.zip
+  rm /tmp/protoc.zip
+else
+  echo "protoc install failed" | tee -a "$LOG_FILE"
+fi
+set -e
 
 #— gmake alias
 
@@ -162,7 +227,13 @@ command -v gmake >/dev/null 2>&1 || ln -s "$(command -v make)" /usr/local/bin/gm
 #— fetch go modules for the repository
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/go.mod" ]; then
+  set +e
   (cd "$SCRIPT_DIR" && go mod download)
+  status=$?
+  set -e
+  if [ $status -ne 0 ]; then
+    echo "go mod download failed" | tee -a "$LOG_FILE"
+  fi
 fi
 
 #— clean up
