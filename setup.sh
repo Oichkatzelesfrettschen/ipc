@@ -156,7 +156,14 @@ unzip -d /usr/local /tmp/protoc.zip
 rm /tmp/protoc.zip
 
 #— gmake alias
+
 command -v gmake >/dev/null 2>&1 || ln -s "$(command -v make)" /usr/local/bin/gmake
+
+#— fetch go modules for the repository
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/go.mod" ]; then
+  (cd "$SCRIPT_DIR" && go mod download)
+fi
 
 #— clean up
 apt-get clean
